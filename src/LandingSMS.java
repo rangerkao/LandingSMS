@@ -57,6 +57,7 @@ public class LandingSMS extends  TimerTask{
 	
 	List<Map<String,String>> VLNChanges = new ArrayList<Map<String,String>>();
 	Map<String,String> countryCodeMap = new HashMap<String,String>();
+	Map<String,String> countryToCountryCodeMap = new HashMap<String,String>();
 	static long period_minute = 15;
 	static int sendLimit = 5;
 	
@@ -139,6 +140,8 @@ public class LandingSMS extends  TimerTask{
 					if(country == null){
 						errorHandle(serviceid+" can't get country.");
 						continue;
+					}else{
+						logger.info(newVln+" is used in  "+country+" .");
 					}
 					
 					String smsIds = querySMSSetting(priceplanId, subsidiaryId, country, vlnType,GPRS);
@@ -166,13 +169,15 @@ public class LandingSMS extends  TimerTask{
 					}
 					
 					//No smsIds is need not to send
-					if(smsIds == null)
+					if(smsIds == null){
+						logger.info(serviceid+" need not send messages.("+priceplanId+","+subsidiaryId+","+country+","+vlnType+","+GPRS+")");
 						continue;
+					}
 					
 					for(String smsId:smsIds.split(",") ){
 						if(smsId!=null && !"".equals(smsId)){
 							//Send SMS
-							sendSMS(serviceid,smsId, language, msisdn);
+							sendSMS(serviceid,smsId, language, msisdn,country,newVln);
 						}	
 					}
 				}else{
@@ -196,6 +201,29 @@ public class LandingSMS extends  TimerTask{
 		return country;
 	}
 	
+	public String queryVLNNumber(String serviceid,String preNumber) throws SQLException{
+		sql = "select A.VLN "
+				+ "from VLNNUMBER A "
+				+ "where A.serviceid = "+serviceid+" and A.STATUS = 1 AND A.VLN like '"+preNumber+"%' ";
+		
+		logger.debug("Execute SQL:"+sql);
+		rs = st.executeQuery(sql);
+		if(rs.next())
+			return rs.getString("VLN");
+		return null;
+	}
+	public String queryServiceNumber(String countryInit) throws SQLException{
+		sql = "select A.PHONE "
+				+ "from HUR_CUSTOMER_SERVICE_PHONE A "
+				+ "where A.COUNTRYINIT = '"+countryInit.toUpperCase()+"' ";
+		
+		logger.debug("Execute SQL:"+sql);
+		rs = st.executeQuery(sql);
+		if(rs.next())
+			return rs.getString("PHONE");
+		return null;
+	}
+	
 	public void setTime(){
 		Date now = new Date();
 		if(lastEndTime==null||"".equals(lastEndTime)){
@@ -203,8 +231,11 @@ public class LandingSMS extends  TimerTask{
 		}else{
 			startTime = lastEndTime;
 		}
-		
+
 			endTime = sdf.format(new Date(now.getTime()-1000*60*1));
+			
+			startTime="20170213080000";
+			endTime="20170213090000";
 		
 		logger.info("Proccess "+startTime+" to "+endTime+" data.");
 	}
@@ -212,7 +243,7 @@ public class LandingSMS extends  TimerTask{
 	public String querySMSSetting(String priceplanId,String subsidiaryId,String country,String vlnType,String GPRS) throws SQLException{
 		sql = "select A.MSG_IDS "
 				+ "from LANDING_SMS_SETTING A "
-				+ "where A.PRICEPLAN_ID = "+priceplanId+" AND A.SUBSIDIARY_ID = "+subsidiaryId+" AND A.COUNTRY = '"+country+"' AND A.VLNTYPE="+vlnType+" AND A.GPRS = "+GPRS+" ";
+				+ "where A.PRICEPLAN_ID like '%"+priceplanId+"%' AND A.SUBSIDIARY_ID = "+subsidiaryId+" AND A.COUNTRY = '"+country+"' AND A.VLNTYPE="+vlnType+" AND A.GPRS = "+GPRS+" ";
 		logger.debug("Execute SQL:"+sql);
 		rs = st.executeQuery(sql);
 		if(rs.next())
@@ -282,6 +313,7 @@ public class LandingSMS extends  TimerTask{
 		rs = st.executeQuery(sql);
 		while(rs.next()){
 			countryCodeMap.put(rs.getString("COUNTRYCODE"), rs.getString("COUNTRYINIT"));
+			countryToCountryCodeMap.put(rs.getString("COUNTRYINIT"), rs.getString("COUNTRYCODE"));
 		}
 	}
 
@@ -439,7 +471,7 @@ public class LandingSMS extends  TimerTask{
 	
 
 	
-	void sendSMS(String serviceid,String smsId,String language,String sendNumber) throws Exception{
+	void sendSMS(String serviceid,String smsId,String language,String sendNumber,String country,String vlnNumber) throws Exception{
 		
 		
 		
@@ -460,8 +492,29 @@ public class LandingSMS extends  TimerTask{
 			return;
 		}
 		
-		String[] paramName = null,paramValue = null;
-		smsContent = processMag(smsContent,paramName,paramValue);
+		Map<String,String> parameters = new HashMap<String,String>();
+		
+		if(smsContent.contains("{{serviceNumber}}")){
+			String serviceNumber = queryServiceNumber(country);
+			if(serviceNumber!=null){
+				parameters.put("{{serviceNumber}}", serviceNumber);
+			}
+		}
+		
+		if(smsContent.contains("{{s2tNumber}}")){
+			parameters.put("{{s2tNumber}}", "+"+sendNumber);
+		}
+		
+		if(smsContent.contains("{{vlnNumber}}")){
+			/*String vlnNumber = queryVLNNumber(serviceid, countryToCountryCodeMap.get(country));
+			if(vlnNumber!=null){
+				parameters.put("{{vlnNumber}}", vlnNumber);
+			}*/
+			parameters.put("{{vlnNumber}}", "+"+vlnNumber);
+		}
+
+		smsContent = processMag(smsContent,parameters);
+		
 		logger.debug("send msg "+new String(smsContent.getBytes("ISO-8859-1"),"BIG5")+"to "+sendNumber+" .");
 		String result = sendNowSMS(smsContent,sendNumber);
 		
@@ -475,8 +528,8 @@ public class LandingSMS extends  TimerTask{
 		sql = "Select A.CONTENT "
 				+ "from LANDING_SMS_CONTENT A "
 				+ "where A.ID = "+smsId+" and A.LANGUAGE = '"+language+"' "
-				+ "and A.START_DATE<=to_char(sysdate,'yyyyMMdd') "
-				+ "and(A.END_DATE is null or to_char(sysdate,'yyyyMMdd') <= A.END_DATE) ";
+				+ "and A.START_DATE<=to_char(sysdate,'yyyyMMddhh24miss') "
+				+ "and(A.END_DATE is null or to_char(sysdate,'yyyyMMddhh24miss') <= A.END_DATE) ";
 		
 		logger.info("Execute SQL:"+sql);
 		rs = st.executeQuery(sql);
@@ -488,11 +541,11 @@ public class LandingSMS extends  TimerTask{
 		return result;
 	}
 	
-	private String processMag(String msg,String[] paramName,String[] paramValue){
+	private String processMag(String msg,Map<String,String> parameters){
 		
-		if(paramName!=null){
-			for(int i = 0;i<paramName.length;i++){
-				msg = msg.replace(paramName[i], paramValue[i]);
+		if(parameters.size()>0){
+			for(String key:parameters.keySet()){
+				msg = msg.replace(key, parameters.get(key));
 			}
 		}
 		
@@ -591,7 +644,7 @@ public class LandingSMS extends  TimerTask{
 			e.printStackTrace(new PrintWriter(s));
 			errorMsg=s.toString();
 		}
-		//sendErrorMail(content+"\n"+errorMsg);
+		sendErrorMail(content+"\n"+errorMsg);
 	}
 	
 	void sendErrorMail(String content){
