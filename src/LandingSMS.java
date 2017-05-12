@@ -1,5 +1,6 @@
 import java.sql.Connection;
 import java.sql.DriverManager;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
@@ -57,9 +58,12 @@ public class LandingSMS extends  TimerTask{
 	
 	List<Map<String,String>> VLNChanges = new ArrayList<Map<String,String>>();
 	Map<String,String> countryCodeMap = new HashMap<String,String>();
-	Map<String,String> countryToCountryCodeMap = new HashMap<String,String>();
+	Set<String> smsCountrys = new HashSet<String>();
+	Map<String,String> countryNameMap = new HashMap<String,String>();
+	Map<String,String> VLRMap = new HashMap<String,String>();
 	static long period_minute = 15;
-	static int sendLimit = 5;
+	static int sendLimit = 100;
+	static long smsWaitingTime = 5000;
 	
 	public static void main(String[] args) throws Exception {
 		
@@ -73,17 +77,22 @@ public class LandingSMS extends  TimerTask{
 
 		initialLog4j();
 		
-		Timer t = new Timer();
-		t.schedule(new LandingSMS(),0L, period_minute*1000*60);
+		
+		if(testMod){
+			new LandingSMS().run();
+		}else{
+			Timer t = new Timer();
+			t.schedule(new LandingSMS(),0L, period_minute*1000*60);
+		}
+		
 		
 	}
 	
 	//LANDING_SMS_CONTENT
 	//LANDING_SMS_CUSTOMIZE
-	//LANDING_SMS_ENTERPRICE_CUSTOM
+	//LANDING_SMS_ENTERPRICE
 	//LANDING_SMS_LOG
 	//LANDING_SMS_SETTING
-	//TODO
 	@Override
 	public void run() {
 		try {
@@ -92,6 +101,8 @@ public class LandingSMS extends  TimerTask{
 			createConnection();
 			//setCountryCode
 			setCountryCode();
+			//set
+			setVLRMapping();
 			//Search need send
 			queryVLRChangeUser();
 			
@@ -104,13 +115,14 @@ public class LandingSMS extends  TimerTask{
 				}
 				
 				//Check if reach daily sending limit
-				if(queryLogTimes(serviceid)!=-1 && sendLimit > queryLogTimes(serviceid)){
+				if(queryLogTimes(serviceid)!=-1 && sendLimit >= queryLogTimes(serviceid)){
 					String priceplanId = m.get("PRICEPLANID");
 					String subsidiaryId = m.get("SUBSIDIARYID");
 					String GPRS = m.get("GPRS");
 					String newVln = m.get("NEWVLN");
 					String msisdn = m.get("MSISDN");
 					String vlnType = m.get("VLNTYPE");
+					String vlr = m.get("VLR");
 					
 					//Get data error handle
 					if(priceplanId == null){
@@ -126,23 +138,25 @@ public class LandingSMS extends  TimerTask{
 						continue;
 					}
 					if(newVln == null){
-						errorHandle(serviceid+" can't get new VLN.");
+						errorHandle(serviceid+" can't get new NEW VLN.");
 						continue;
 					}
+					/*if(vlr == null){
+						errorHandle(serviceid+" can't get new VLR.");
+						continue;
+					}*/
 					if(msisdn == null){
 						errorHandle(serviceid+" can't get msisdn.");
 						continue;
 					}
 					
 					//find country
-					String country = mapingCountryCode(newVln);
+					String country = mapingCountryCode(newVln,vlr);
 					
-					if(country == null){
-						errorHandle(serviceid+" can't get country.");
-						continue;
-					}else{
-						logger.info(newVln+" is used in  "+country+" .");
-					}
+					
+					logger.info("The newVln/VLR ("+newVln+"/"+vlr+")  at  "+country+" .");
+					
+					if("PASS".equalsIgnoreCase(country)) continue;
 					
 					String smsIds = querySMSSetting(priceplanId, subsidiaryId, country, vlnType,GPRS);
 					
@@ -191,14 +205,42 @@ public class LandingSMS extends  TimerTask{
 		}
 	}
 	
-	public String mapingCountryCode(String vln){
+	public String mapingCountryCode(String vln,String vlr){
 		String country= null;
-		for(int i = 1 ; i <=vln.length() ; i++){
-			country = countryCodeMap.get(vln.substring(0, i));
-			if(country!=null)
-				break;
+		
+		
+		
+		if(vln.startsWith("852")){
+			//Search by VLR
+			
+			if(vlr != null && !vlr.startsWith("886")){
+				
+				for(String s : VLRMap.keySet()){
+					if(vlr.matches("^"+s+".*")){
+						country = VLRMap.get(s);
+						if(country!=null){
+							return country.toUpperCase();
+						}
+					}
+				}
+				/*for(int i = 1  ; i<=vlr.length() ; i++){
+					country = VLRMap.get(vlr.substring(0,i));
+					if(country!=null){
+						return country.toUpperCase();
+					}
+				}*/
+			}
+			
+		}else{
+			//for other country
+			for(int i = 1 ; i <=vln.length() ; i++){
+				country = countryCodeMap.get(vln.substring(0, i));
+				if(country!=null){
+					return country.toUpperCase();
+				}
+			}
 		}
-		return country;
+		return "PASS";
 	}
 	
 	public String queryVLNNumber(String serviceid,String preNumber) throws SQLException{
@@ -213,34 +255,35 @@ public class LandingSMS extends  TimerTask{
 		return null;
 	}
 	public String queryServiceNumber(String countryInit) throws SQLException{
-		sql = "select A.PHONE "
+		sql = "select A.CHT_PHONE "
 				+ "from HUR_CUSTOMER_SERVICE_PHONE A "
 				+ "where A.COUNTRYINIT = '"+countryInit.toUpperCase()+"' ";
 		
 		logger.debug("Execute SQL:"+sql);
 		rs = st.executeQuery(sql);
 		if(rs.next())
-			return rs.getString("PHONE");
+			return rs.getString("CHT_PHONE");
 		return null;
 	}
 	
 	public void setTime(){
 		Date now = new Date();
 		if(lastEndTime==null||"".equals(lastEndTime)){
-			startTime = sdf.format(new Date(now.getTime()-1000*60*10)); //¹w³]¬°¬d¸ß¹L¥h10¤ÀÄÁ 
+			startTime = sdf.format(new Date(now.getTime()-1000*60*10)); //é è¨­ç‚ºæŸ¥è©¢éŽåŽ»10åˆ†é˜ 
 		}else{
 			startTime = lastEndTime;
 		}
 
 			endTime = sdf.format(new Date(now.getTime()-1000*60*1));
 			
-			startTime="20170213080000";
-			endTime="20170213090000";
+			startTime="20170501161600";
+			endTime="20170501161620";
 		
 		logger.info("Proccess "+startTime+" to "+endTime+" data.");
 	}
 	
 	public String querySMSSetting(String priceplanId,String subsidiaryId,String country,String vlnType,String GPRS) throws SQLException{
+		
 		sql = "select A.MSG_IDS "
 				+ "from LANDING_SMS_SETTING A "
 				+ "where A.PRICEPLAN_ID like '%"+priceplanId+"%' AND A.SUBSIDIARY_ID = "+subsidiaryId+" AND A.COUNTRY = '"+country+"' AND A.VLNTYPE="+vlnType+" AND A.GPRS = "+GPRS+" ";
@@ -262,7 +305,7 @@ public class LandingSMS extends  TimerTask{
 	
 	public String querySMSEnterpriceCustom(String serviceid) throws SQLException{
 		sql = "select A.MSG_ID "
-				+ "from LANDING_SMS_ENTERPRICE_CUSTOM A "
+				+ "from LANDING_SMS_ENTERPRICE A "
 				+ "where A.SERVICEID = "+serviceid+" ";
 		
 		logger.debug("Execute SQL:"+sql);
@@ -275,20 +318,33 @@ public class LandingSMS extends  TimerTask{
 	
 	public boolean insertSMSLog(String serviceid,String number,String content) throws Exception{
 		
-		String id = null;
+		Integer id = null;
 		sql = "select MAX(ID)+1 ID from LANDING_SMS_LOG ";
 		rs = st.executeQuery(sql);
 		if(rs.next())
-			id = rs.getString("ID");
+			id = rs.getInt("ID");
 		
 		if(id==null){
 			throw new Exception("Can't get log id");
 		}
 		sql = "insert into LANDING_SMS_LOG (ID,SERVICEID,SEND_NUMBER,CONTENT) "
-				+ "values("+id+","+serviceid+",'"+number+"','"+content+"')";
-		
+				//+ "values("+id+","+serviceid+",'"+number+"','"+content+"')";
+				+ "values(?,?,?,?)";
 		logger.debug("Execute SQL:"+sql);
-		int result = st.executeUpdate(sql);
+		
+		PreparedStatement ps  = null;
+		int result = 0;
+		try {
+			ps = conn.prepareStatement(sql);
+			ps.setInt(1, id);
+			ps.setInt(2, Integer.parseInt(serviceid));
+			ps.setString(3, number);
+			ps.setString(4, content);
+			result = ps.executeUpdate();
+		} finally{
+			if(ps!=null) ps.close();
+		}
+		
 		return result==1?true:false;
 		
 	}
@@ -306,31 +362,63 @@ public class LandingSMS extends  TimerTask{
 		return -1;
 	}
 	
+	
+	
 	public void setCountryCode() throws SQLException{
+		countryCodeMap.clear();
+		smsCountrys.clear();
+		countryNameMap.clear();
+		
 		sql = "select A.COUNTRYCODE,A.COUNTRYINIT,A.COUNTRYNAME "
-				+ "from COUNTRYINITIAL A";
+				+ "from LANDING_SMS_COUNTRY A "
+				+ "WHERE status = 1 ";
 		logger.debug("Execute SQL:"+sql);
 		rs = st.executeQuery(sql);
 		while(rs.next()){
 			countryCodeMap.put(rs.getString("COUNTRYCODE"), rs.getString("COUNTRYINIT"));
-			countryToCountryCodeMap.put(rs.getString("COUNTRYINIT"), rs.getString("COUNTRYCODE"));
+			smsCountrys.add(rs.getString("COUNTRYINIT"));
+			countryNameMap.put(rs.getString("COUNTRYINIT"), rs.getString("COUNTRYNAME"));
 		}
+	}
+	
+	
+	public void setVLRMapping() throws SQLException{
+		VLRMap.clear();
+		/*sql = "SELECT substr(b.realmname,0,3) COUNTRY, a.chargeareacode CODE "
+				+ "FROM Chargeareaconfig a, realm b "
+				+ "WHERE a.areareference=b.areareference "
+				+ "AND (b.realmname LIKE 'CAN%' OR b.realmname LIKE 'USA%') "
+				+ "ORDER BY a.areareference, a.chargeareacode";*/
+		
+		sql = "select A.CHARGEAREACODE,A.CHARGEAREANAME,B.AREACODE,substr(B.REALMNAME,0,3) NAMECODE "
+				+ "from CHARGEAREACONFIG A,REALM B "
+				+ "where A.AREAREFERENCE = B.AREAREFERENCE ";
+		
+		logger.debug("Execute SQL:"+sql);
+		rs = st2.executeQuery(sql);
+		while(rs.next()){
+	
+			if(smsCountrys.contains(rs.getString("NAMECODE"))){
+				VLRMap.put(rs.getString("CHARGEAREACODE"), rs.getString("NAMECODE"));
+			}
+		}
+		
 	}
 
 	public void queryVLRChangeUser() throws SQLException{
 		/**
-		 * MSISDN: ¥Î¤á­»´ä¸¹
-			SUBSIDIARYID: ¥Î¤á¸s²Õ
-			NEWVLN: ·sªºVLN
-			PRICEPLANID: ¸ê¶O¤è®×
-			VLR_NUMBER: VLR½s¸¹(§P©w°ê½X¥Î)
-			GPRS: ¬O§_¥Ó½Ð¼Æ¾Ú (0: ¦³¥Ó½Ð¼Æ¾Ú, 1: ¨S¥Ó½Ð¼Æ¾Ú)
-			VLNTYPE: VLNÃþ§O(0: °ÊºA, 1: ÀRºA)
+		 * MSISDN: ç”¨æˆ¶é¦™æ¸¯è™Ÿ
+			SUBSIDIARYID: ç”¨æˆ¶ç¾¤çµ„
+			NEWVLN: æ–°çš„VLN
+			PRICEPLANID: è³‡è²»æ–¹æ¡ˆ
+			VLR_NUMBER: VLRç·¨è™Ÿ(åˆ¤å®šåœ‹ç¢¼ç”¨)
+			GPRS: æ˜¯å¦ç”³è«‹æ•¸æ“š (0: æœ‰ç”³è«‹æ•¸æ“š, 1: æ²’ç”³è«‹æ•¸æ“š)
+			VLNTYPE: VLNé¡žåˆ¥(0: å‹•æ…‹, 1: éœæ…‹)
 		 */
 		VLNChanges.clear();
-		sql = "SELECT A.MSISDN, A.SUBSIDIARYID, A.NEWVLN, A.PRICEPLANID, A.VLR_NUMBER, NVL(B.STATUS,1) GPRS, A.VLNTYPE,A.SERVICEID "
+		sql = "SELECT A.MSISDN, A.SUBSIDIARYID, A.NEWVLN, A.PRICEPLANID, A.VLR_NUMBER, NVL(B.STATUS,1) GPRS, A.VLNTYPE,A.SERVICEID,A.LASTSUCCESSTIME "
 				+ "FROM  ( SELECT DISTINCT B.SERVICECODE MSISDN, B.SUBSIDIARYID,B.SERVICEID, "
-				+ "								A.MSGCONTENT NEWVLN, B.PRICEPLANID, B.VLR_NUMBER, B.VLNTYPE "
+				+ "								A.MSGCONTENT NEWVLN, B.PRICEPLANID, B.VLR_NUMBER, B.VLNTYPE,A.LASTSUCCESSTIME "
 				+ "			   FROM MSSENDINGTASK A,"
 				+ "                          (  SELECT B.SERVICECODE, A.VLN, A.VPLMNID, B.SUBSIDIARYID,B.SERVICEID, B.PRICEPLANID, C.VLR_NUMBER, A.VLNTYPE "
 				+ "                              FROM "
@@ -350,7 +438,7 @@ public class LandingSMS extends  TimerTask{
 				+ "                FROM SERVICEPARAMETER A, SERVICE B "
 				+ "                  WHERE PARAMETERID=3749 AND A.SERVICEID=B.SERVICEID ) B "
 				+ ""
-				+ "WHERE A.MSISDN=B.SERVICECODE(+) ";
+				+ "WHERE A.MSISDN=B.SERVICECODE(+) order by A.LASTSUCCESSTIME desc ";
 		
 			logger.debug("Execute SQL:"+sql);
 			rs = st2.executeQuery(sql);
@@ -364,6 +452,7 @@ public class LandingSMS extends  TimerTask{
 				m.put("PRICEPLANID", rs.getString("PRICEPLANID"));
 				m.put("GPRS", rs.getString("GPRS"));
 				m.put("VLNTYPE", rs.getString("VLNTYPE"));
+				m.put("VLR", rs.getString("VLR_NUMBER"));
 				VLNChanges.add(m);
 			}		
 	}
@@ -399,7 +488,7 @@ public class LandingSMS extends  TimerTask{
 		String url,DriverClass,UserName,PassWord;
 		
 		
-		if(testMod){
+		/*if(testMod){
 			url=props.getProperty("Test.Oracle.URL")
 					.replace("{{Host}}", props.getProperty("Test.Oracle.Host"))
 					.replace("{{Port}}", props.getProperty("Test.Oracle.Port"))
@@ -419,13 +508,23 @@ public class LandingSMS extends  TimerTask{
 			DriverClass = props.getProperty("Oracle.DriverClass");
 			UserName = props.getProperty("Oracle.UserName");
 			PassWord = props.getProperty("Oracle.PassWord");
-		}
+		}*/
+		url=props.getProperty("Oracle.URL")
+				.replace("{{Host}}", props.getProperty("Oracle.Host"))
+				.replace("{{Port}}", props.getProperty("Oracle.Port"))
+				.replace("{{ServiceName}}", (props.getProperty("Oracle.ServiceName")!=null?props.getProperty("Oracle.ServiceName"):""))
+				.replace("{{SID}}", (props.getProperty("Oracle.SID")!=null?props.getProperty("Oracle.SID"):""));
+		
+		DriverClass = props.getProperty("Oracle.DriverClass");
+		UserName = props.getProperty("Oracle.UserName");
+		PassWord = props.getProperty("Oracle.PassWord");
+		
 		Class.forName(DriverClass);
 		conn = DriverManager.getConnection(url, UserName, PassWord);
 		st = conn.createStatement();
 		String url2,DriverClass2,UserName2,PassWord2;
 		
-		if(testMod){
+		/*if(testMod){
 			url2=props.getProperty("Test.mBOSS.URL")
 					.replace("{{Host}}", props.getProperty("Test.mBOSS.Host"))
 					.replace("{{Port}}", props.getProperty("Test.mBOSS.Port"))
@@ -446,8 +545,17 @@ public class LandingSMS extends  TimerTask{
 			DriverClass2 = props.getProperty("mBOSS.DriverClass");
 			UserName2 = props.getProperty("mBOSS.UserName");
 			PassWord2 = props.getProperty("mBOSS.PassWord");
-		}
+		}*/
 		
+		url2=props.getProperty("mBOSS.URL")
+				.replace("{{Host}}", props.getProperty("mBOSS.Host"))
+				.replace("{{Port}}", props.getProperty("mBOSS.Port"))
+				.replace("{{ServiceName}}", (props.getProperty("mBOSS.ServiceName")!=null?props.getProperty("mBOSS.ServiceName"):""))
+				.replace("{{SID}}", (props.getProperty("mBOSS.SID")!=null?props.getProperty("mBOSS.SID"):""));
+		
+		DriverClass2 = props.getProperty("mBOSS.DriverClass");
+		UserName2 = props.getProperty("mBOSS.UserName");
+		PassWord2 = props.getProperty("mBOSS.PassWord");
 		
 		Class.forName(DriverClass2);
 		conn2 = DriverManager.getConnection(url2, UserName2, PassWord2);
@@ -506,21 +614,27 @@ public class LandingSMS extends  TimerTask{
 		}
 		
 		if(smsContent.contains("{{vlnNumber}}")){
-			/*String vlnNumber = queryVLNNumber(serviceid, countryToCountryCodeMap.get(country));
-			if(vlnNumber!=null){
-				parameters.put("{{vlnNumber}}", vlnNumber);
-			}*/
 			parameters.put("{{vlnNumber}}", "+"+vlnNumber);
+		}
+		
+		//20170427
+		if(smsContent.contains("{{location}}")){
+			parameters.put("{{location}}", "HKG".equalsIgnoreCase(country) ? "" : " in "+countryNameMap.get(country));
 		}
 
 		smsContent = processMag(smsContent,parameters);
 		
-		logger.debug("send msg "+new String(smsContent.getBytes("ISO-8859-1"),"BIG5")+"to "+sendNumber+" .");
+		logger.debug("send msg "+new String(smsContent.getBytes("ISO-8859-1"),"UTF8")+"to "+sendNumber+" .");
 		String result = sendNowSMS(smsContent,sendNumber);
 		
 		insertSMSLog(serviceid, sendNumber, smsContent);
 		
+		try {
+			Thread.sleep(5000);
+		} catch (Exception e) {}
+		
 	}
+	
 	
 	String getSMSContent(String smsId,String language) throws SQLException, UnsupportedEncodingException{
 		String result = null;
@@ -528,8 +642,8 @@ public class LandingSMS extends  TimerTask{
 		sql = "Select A.CONTENT "
 				+ "from LANDING_SMS_CONTENT A "
 				+ "where A.ID = "+smsId+" and A.LANGUAGE = '"+language+"' "
-				+ "and A.START_DATE<=to_char(sysdate,'yyyyMMddhh24miss') "
-				+ "and(A.END_DATE is null or to_char(sysdate,'yyyyMMddhh24miss') <= A.END_DATE) ";
+				+ "and A.START_TIME<=to_char(sysdate,'yyyyMMddhh24miss') "
+				+ "and(A.END_TIME is null or to_char(sysdate,'yyyyMMddhh24miss') <= A.END_TIME) ";
 		
 		logger.info("Execute SQL:"+sql);
 		rs = st.executeQuery(sql);
@@ -559,7 +673,7 @@ public class LandingSMS extends  TimerTask{
 			phone=defaultSMSReceiver;
 		}
 		
-		String PhoneNumber=phone,Text=msg,charset="big5",InfoCharCounter=null,PID=null,DCS=null;
+		String PhoneNumber=phone,Text=msg,charset="UTF8",InfoCharCounter=null,PID=null,DCS=null;
 		String param =
 				"PhoneNumber=+{{PhoneNumber}}&"
 				+ "Text={{Text}}&"
@@ -611,8 +725,11 @@ public class LandingSMS extends  TimerTask{
  
 		int responseCode = con.getResponseCode();
 		System.out.println("\nSending 'POST' request to URL : " + url);
-		System.out.println("Post parameters : " + new String(param.getBytes("ISO8859-1")));
+		System.out.println("Post parameters : " + param);
 		System.out.println("Response Code : " + responseCode);
+		//TODO
+		logger.info("URL: "+url);
+		logger.info("parameters: "+param);
  
 		BufferedReader in = new BufferedReader(
 		        new InputStreamReader(con.getInputStream()));
