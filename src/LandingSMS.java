@@ -4,8 +4,10 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.text.ParseException;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -61,8 +63,8 @@ public class LandingSMS extends  TimerTask{
 	Set<String> smsCountrys = new HashSet<String>();
 	Map<String,String> countryNameMap = new HashMap<String,String>();
 	Map<String,String> VLRMap = new HashMap<String,String>();
-	static long period_minute = 15;
-	static int sendLimit = 100;
+	static long period_minute = 10;
+	static int sendLimit = 5;
 	static long smsWaitingTime = 5000;
 	
 	public static void main(String[] args) throws Exception {
@@ -74,9 +76,6 @@ public class LandingSMS extends  TimerTask{
 		}
 		
 		loadProperties();
-
-		initialLog4j();
-		
 		
 		if(testMod){
 			new LandingSMS().run();
@@ -98,6 +97,11 @@ public class LandingSMS extends  TimerTask{
 		try {
 			setTime();
 			
+			if(sendCheckMail){
+				sendMail("Landing SMS daily check mail ", "Landing SMS daily check mail ", defaultMailReceiver);
+				sendCheckMail = false;
+			}
+			
 			createConnection();
 			//setCountryCode
 			setCountryCode();
@@ -115,7 +119,8 @@ public class LandingSMS extends  TimerTask{
 				}
 				
 				//Check if reach daily sending limit
-				if(queryLogTimes(serviceid)!=-1 && sendLimit >= queryLogTimes(serviceid)){
+				int toDayLogTimes = queryLogTimes(serviceid);
+				if(toDayLogTimes!=-1 && sendLimit >= toDayLogTimes){
 					String priceplanId = m.get("PRICEPLANID");
 					String subsidiaryId = m.get("SUBSIDIARYID");
 					String GPRS = m.get("GPRS");
@@ -154,11 +159,51 @@ public class LandingSMS extends  TimerTask{
 					String country = mapingCountryCode(newVln,vlr);
 					
 					
-					logger.info("The newVln/VLR ("+newVln+"/"+vlr+")  at  "+country+" .");
+					logger.info("The "+serviceid+" newVln/VLR ("+newVln+"/"+vlr+")  at  "+country+" .");
 					
 					if("PASS".equalsIgnoreCase(country)) continue;
 					
+					if(country == null){
+						errorHandle("The "+serviceid+" newVln/VLR ("+newVln+"/"+vlr+")  at  "+country+" .");
+						continue;
+					}
+						
+					
+					
+					//Set<String> smsIdSet = new HashSet<String>();
+					
+					List<String> smsIdList = new ArrayList<String>();
+
 					String smsIds = querySMSSetting(priceplanId, subsidiaryId, country, vlnType,GPRS);
+					
+					
+					//20170926 add 將中國臨時號用戶拆分為"臨時號未申請固定號6(預設)"、"臨時號已申請固定號7"
+					
+					if("CHN".equals(country) && queryStaticNumberApplied(serviceid)){
+						//將有申請中國固定號的用戶簡訊ID從6改為7
+						smsIds.replaceAll("6", "7");
+					}	
+					
+					
+					if(smsIds!=null){
+						for(String smsId:smsIds.split(",") ){
+							smsIdList.add(smsId);
+						}
+					}
+					
+					//20170614 針對在中國與香港的華人上網包用戶，已開數據的話，不需發送提醒當地每日上限簡訊
+					//SX001 香港
+					//SX002 香港+大陸
+					
+					if("HKG".equals(country) && 0<queryAddonServiceData(serviceid,null)){
+						smsIdList.remove("3");
+					}
+					
+					if("CHN".equals(country) && 0<queryAddonServiceData(serviceid,"SX002")){
+						smsIdList.remove("8");
+					}			
+					
+					
 					
 					//Query personal Setting
 					//default:CHT, need not to send:OFF
@@ -175,20 +220,19 @@ public class LandingSMS extends  TimerTask{
 					String extraSMSIds = querySMSEnterpriceCustom(serviceid);
 					
 					if(extraSMSIds!=null){
-						if(smsIds==null || "".equals(smsIds)){
-							smsIds = extraSMSIds;
-						}else{
-							smsIds = smsIds+","+extraSMSIds;
+						for(String smsId:extraSMSIds.split(",") ){
+							smsIdList.add(smsId);
 						}
 					}
 					
 					//No smsIds is need not to send
-					if(smsIds == null){
+					if(smsIdList.size() == 0 ){
 						logger.info(serviceid+" need not send messages.("+priceplanId+","+subsidiaryId+","+country+","+vlnType+","+GPRS+")");
 						continue;
 					}
 					
-					for(String smsId:smsIds.split(",") ){
+					
+					for(String smsId: smsIdList ){
 						if(smsId!=null && !"".equals(smsId)){
 							//Send SMS
 							sendSMS(serviceid,smsId, language, msisdn,country,newVln);
@@ -198,11 +242,62 @@ public class LandingSMS extends  TimerTask{
 					logger.info(serviceid+" had reached sending times limit.");
 				}
 			}
-			closeConnection();
 			lastEndTime = endTime;
 		} catch (Exception e){
 			errorHandle(e);
+		}finally{
+			closeConnection();
 		}
+	}
+	
+	public boolean queryStaticNumberApplied(String serviceId) throws SQLException {
+		
+		String sql = "select a.imsi,c.PARTNERMSISDN "
+				+ "from IMSI A,service B,AVAILABLEMSISDN c "
+				+ "where A.serviceid = B.serviceid and B.servicecode = c.s2tMsisdn and a.serviceid = "+serviceId+" ";
+		st = conn.createStatement();		
+		rs = st.executeQuery(sql);
+		
+		String s2tIMSI=null,chtMsisdn=null;
+		
+		while(rs.next()){
+			s2tIMSI = rs.getString("IMSI");
+			chtMsisdn = rs.getString("PARTNERMSISDN");
+		}
+		
+		sql = "select instr(A.content,'CHNA') CD "
+				+ "from PROVLOG A "
+				+ "where (A.CONTENT like '%TWNLD_MSISDN="+chtMsisdn+"%' or A.CONTENT like '%S2T_IMSI="+s2tIMSI+"%'  )"
+				+ "AND (A.CONTENT like '%Req_Status=07%' or A.CONTENT like '%Req_Status=99%') "
+				+ "order by A.REQTIME desc ";
+		
+		//只取最後一筆
+		if(rs.next()){
+			int cd = rs.getInt("CD");
+			if(cd!=0)
+				return true;
+		}
+		
+		
+		return false;
+	}
+	
+	
+	public int queryAddonServiceData(String serviceid,String serviceCode) throws SQLException{
+		
+		int result = 0;
+		
+		sql = "select count(1) CD from ADDONSERVICE_N A where A.SERVICEID = '"+serviceid+"' and A.ENDDATE is null ";
+		
+		if(serviceCode !=null)
+			sql += " and A.SERVICECODE = '"+serviceCode+"' ";
+		
+		logger.debug("Execute SQL:"+sql);
+		rs = st.executeQuery(sql);
+		if(rs.next())
+			result = rs.getInt("CD");
+
+		return result ;
 	}
 	
 	public String mapingCountryCode(String vln,String vlr){
@@ -229,6 +324,9 @@ public class LandingSMS extends  TimerTask{
 						return country.toUpperCase();
 					}
 				}*/
+			}else{
+				//在台灣不送
+				return "PASS";
 			}
 			
 		}else{
@@ -240,7 +338,7 @@ public class LandingSMS extends  TimerTask{
 				}
 			}
 		}
-		return "PASS";
+		return null;
 	}
 	
 	public String queryVLNNumber(String serviceid,String preNumber) throws SQLException{
@@ -265,19 +363,37 @@ public class LandingSMS extends  TimerTask{
 			return rs.getString("CHT_PHONE");
 		return null;
 	}
+	Date checkTime = null; //HHmmss
+	boolean sendCheckMail = false;
+	
+	SimpleDateFormat sdf2 = new SimpleDateFormat("yyyyMMdd");
 	
 	public void setTime(){
 		Date now = new Date();
+		
 		if(lastEndTime==null||"".equals(lastEndTime)){
-			startTime = sdf.format(new Date(now.getTime()-1000*60*10)); //預設為查詢過去10分鐘 
+			startTime = sdf.format(new Date(now.getTime()-1000*60*period_minute)); //預設為查詢過去間隔分鐘 
 		}else{
 			startTime = lastEndTime;
 		}
 
-			endTime = sdf.format(new Date(now.getTime()-1000*60*1));
+			endTime = sdf.format(new Date(now.getTime()));
 			
-			startTime="20170501161600";
-			endTime="20170501161620";
+			//startTime="20170501161600";
+			//endTime="20170501161620";
+			
+			try {
+				if(checkTime != null && sdf.parse(startTime).before(checkTime) && (sdf.parse(endTime).after(checkTime)||sdf.parse(endTime).equals(checkTime))){
+					sendCheckMail = true;
+				}
+				checkTime = sdf2.parse(sdf2.format(new Date(now.getTime()+1000*60*60*24)));
+				logger.info("set next checkMail time "+checkTime);
+			} catch (ParseException e) {
+				errorHandle("At set check mail flag occured ParseException",e);
+			}
+			
+			
+
 		
 		logger.info("Proccess "+startTime+" to "+endTime+" data.");
 	}
@@ -286,7 +402,10 @@ public class LandingSMS extends  TimerTask{
 		
 		sql = "select A.MSG_IDS "
 				+ "from LANDING_SMS_SETTING A "
-				+ "where A.PRICEPLAN_ID like '%"+priceplanId+"%' AND A.SUBSIDIARY_ID = "+subsidiaryId+" AND A.COUNTRY = '"+country+"' AND A.VLNTYPE="+vlnType+" AND A.GPRS = "+GPRS+" ";
+				+ "where A.PRICEPLAN_ID like '%"+priceplanId+"%' AND A.SUBSIDIARY_ID = "+subsidiaryId+" AND A.COUNTRY = '"+country+"' AND A.VLNTYPE="+vlnType+" AND A.GPRS = "+GPRS+" "
+				+ "and A.START_TIME<=to_char(sysdate,'yyyyMMddhh24miss') "
+				+ "and(A.END_TIME is null or to_char(sysdate,'yyyyMMddhh24miss') < A.END_TIME) ";
+		
 		logger.debug("Execute SQL:"+sql);
 		rs = st.executeQuery(sql);
 		if(rs.next())
@@ -416,7 +535,10 @@ public class LandingSMS extends  TimerTask{
 			VLNTYPE: VLN類別(0: 動態, 1: 靜態)
 		 */
 		VLNChanges.clear();
-		sql = "SELECT A.MSISDN, A.SUBSIDIARYID, A.NEWVLN, A.PRICEPLANID, A.VLR_NUMBER, NVL(B.STATUS,1) GPRS, A.VLNTYPE,A.SERVICEID,A.LASTSUCCESSTIME "
+		sql = "SELECT A.MSISDN, A.SUBSIDIARYID, A.NEWVLN, A.PRICEPLANID, A.VLR_NUMBER, "
+				+ "Case  NVL(B.STATUS,1) when '1' then '0' when '0' then '1' end GPRS,"
+			//+ "NVL(B.STATUS,1) GPRS, "
+				+ "A.VLNTYPE,A.SERVICEID,A.LASTSUCCESSTIME "
 				+ "FROM  ( SELECT DISTINCT B.SERVICECODE MSISDN, B.SUBSIDIARYID,B.SERVICEID, "
 				+ "								A.MSGCONTENT NEWVLN, B.PRICEPLANID, B.VLR_NUMBER, B.VLNTYPE,A.LASTSUCCESSTIME "
 				+ "			   FROM MSSENDINGTASK A,"
@@ -463,17 +585,21 @@ public class LandingSMS extends  TimerTask{
 		props.load(new   FileInputStream(path));
 		PropertyConfigurator.configure(props);
 		
+		initialLog4j();
+		
 		testMod = !"false".equals(props.getProperty("TestMod").trim());
 		
 		defaultMailReceiver = props.getProperty("DefaultMailReceiver");
 		defaultSMSReceiver = props.getProperty("DefaultSMSReceiver");
 		
-		errorMailreceiver = props.getProperty("ErrorMailReceiver",defaultMailReceiver);
-		period_minute = Long.parseLong(props.getProperty("period_minute","5"));
+		if(!testMod)
+			errorMailreceiver = props.getProperty("ErrorMailReceiver",defaultMailReceiver);
+
+		period_minute = Long.parseLong(props.getProperty("period_minute","15"));
 		deafultLanguage = props.getProperty("DeafultLanguage","");
 		
 		
-		out.println(testMod+"\n"+defaultMailReceiver+"\n"+defaultSMSReceiver+"\n"+errorMailreceiver+"\n"+deafultLanguage+"\n"+period_minute);
+		logger.info(testMod+"\n"+defaultMailReceiver+"\n"+defaultSMSReceiver+"\n"+errorMailreceiver+"\n"+deafultLanguage+"\n"+period_minute);
 		
 		System.out.println("loadProperties Success!");
 	}
@@ -563,16 +689,18 @@ public class LandingSMS extends  TimerTask{
 		logger.info("createConnection Success!");
 	}
 	
-	void closeConnection() throws SQLException{
+	void closeConnection(){
 		logger.info("closeConnection...");
+		
 		if(st!=null)
-			st.close();
+			try {st.close();} catch (Exception e) {}
+		
 		if(st2!=null)
-			st2.close();
+			try {st2.close();} catch (Exception e) {}
 		if(conn!=null)
-			conn.close();
+			try {conn.close();} catch (Exception e) {}
 		if(conn2!=null)
-			conn2.close();
+			try {conn2.close();} catch (Exception e) {}
 		
 		logger.info("closeConnection Success!");
 	}
@@ -643,7 +771,7 @@ public class LandingSMS extends  TimerTask{
 				+ "from LANDING_SMS_CONTENT A "
 				+ "where A.ID = "+smsId+" and A.LANGUAGE = '"+language+"' "
 				+ "and A.START_TIME<=to_char(sysdate,'yyyyMMddhh24miss') "
-				+ "and(A.END_TIME is null or to_char(sysdate,'yyyyMMddhh24miss') <= A.END_TIME) ";
+				+ "and(A.END_TIME is null or to_char(sysdate,'yyyyMMddhh24miss') < A.END_TIME) ";
 		
 		logger.info("Execute SQL:"+sql);
 		rs = st.executeQuery(sql);
@@ -765,11 +893,10 @@ public class LandingSMS extends  TimerTask{
 	}
 	
 	void sendErrorMail(String content){
-		sendMail(content,errorMailreceiver);
+		sendMail("sendLandingSMS Error",content,errorMailreceiver);
 	}
 	
-	void sendMail(String mailContent,String mailReceiver){
-		String mailSubject="sendLandingSMS Error";
+	void sendMail(String mailSubject,String mailContent,String mailReceiver){
 		String mailSender="LandingSMS_Server";
 		
 		String [] cmd=new String[3];
