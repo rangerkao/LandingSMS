@@ -352,15 +352,16 @@ public class LandingSMS extends  TimerTask{
 			return rs.getString("VLN");
 		return null;
 	}
-	public String queryServiceNumber(String countryInit) throws SQLException{
-		sql = "select A.CHT_PHONE "
+	public String queryServiceNumber(String countryInit,boolean isS2T) throws SQLException{
+	
+		sql = "select A.CHT_PHONE,A.S2T_PHONE "
 				+ "from HUR_CUSTOMER_SERVICE_PHONE A "
 				+ "where A.COUNTRYINIT = '"+countryInit.toUpperCase()+"' ";
 		
 		logger.debug("Execute SQL:"+sql);
 		rs = st.executeQuery(sql);
 		if(rs.next())
-			return rs.getString("CHT_PHONE");
+			return isS2T?rs.getString("S2T_PHONE"):rs.getString("CHT_PHONE");
 		return null;
 	}
 	Date checkTime = null; //HHmmss
@@ -545,11 +546,12 @@ public class LandingSMS extends  TimerTask{
 				+ "                          (  SELECT B.SERVICECODE, A.VLN, A.VPLMNID, B.SUBSIDIARYID,B.SERVICEID, B.PRICEPLANID, C.VLR_NUMBER, A.VLNTYPE "
 				+ "                              FROM "
 				+ "                                            ( SELECT DISTINCT SERVICEID, SERVICECODE VLN, 1 VPLMNID, '1' VLNTYPE, '1' STATUS "
-				+ "                                              FROM SERVICE"
+				+ "                                              FROM SERVICE "
+				+ "												 WHERE STATUS in (1,3) "
 				+ "                                              UNION ALL"
 				+ "                                              SELECT SERVICEID, VLN, VPLMNID, VLNTYPE, STATUS "
 				+ "                                              FROM VLNNUMBER) A, SERVICE B, UTCN.BASICPROFILE C "
-				+ "                                              WHERE A.SERVICEID=B.SERVICEID AND B.SERVICEID=C.SERVICEID AND A.STATUS=1 )  B"
+				+ "                                              WHERE A.SERVICEID=B.SERVICEID AND B.STATUS in (1,3) AND B.SERVICEID=C.SERVICEID AND A.STATUS=1 )  B"
 				+ " "
 				+ "                WHERE TO_CHAR(A.LASTSUCCESSTIME,'YYYYMMDDHH24MISS') >= '"+startTime+"'   "
 				+ "                				AND TO_CHAR(A.LASTSUCCESSTIME,'YYYYMMDDHH24MISS') < '"+endTime+"' "
@@ -558,7 +560,7 @@ public class LandingSMS extends  TimerTask{
 				+ " "
 				+ "			( 	SELECT B.SERVICEID, B.SERVICECODE, A.STATUS "
 				+ "                FROM SERVICEPARAMETER A, SERVICE B "
-				+ "                  WHERE PARAMETERID=3749 AND A.SERVICEID=B.SERVICEID ) B "
+				+ "                  WHERE PARAMETERID=3749  AND B.STATUS in (1,3) AND A.SERVICEID=B.SERVICEID ) B "
 				+ ""
 				+ "WHERE A.MSISDN=B.SERVICECODE(+) order by A.LASTSUCCESSTIME desc ";
 		
@@ -729,11 +731,19 @@ public class LandingSMS extends  TimerTask{
 		}
 		
 		Map<String,String> parameters = new HashMap<String,String>();
+		boolean isS2T = true;
 		
-		if(smsContent.contains("{{serviceNumber}}")){
-			String serviceNumber = queryServiceNumber(country);
+		if(smsContent.contains("{{s2tServiceNumber}}")){
+			String serviceNumber = queryServiceNumber(country,isS2T);
 			if(serviceNumber!=null){
-				parameters.put("{{serviceNumber}}", serviceNumber);
+				parameters.put("{{s2tServiceNumber}}", serviceNumber);
+			}
+		}
+		
+		if(smsContent.contains("{{chtServiceNumber}}")){
+			String serviceNumber = queryServiceNumber(country,!isS2T);
+			if(serviceNumber!=null){
+				parameters.put("{{chtServiceNumber}}", serviceNumber);
 			}
 		}
 		
